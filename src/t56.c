@@ -221,6 +221,29 @@ int t56_begin_transaction(minipro_handle_t *handle)
 		format_int(&(msg[56]), handle->device->flags.raw_flags, 4,
 			   MP_LITTLE_ENDIAN);
 
+		/* OVC "Vcc Current Imax" trip level. RE'd from Xgpro (the
+		 * T48/T56/TL866II build): the 0x03 BEGIN_TRANS command carries
+		 * it as a 16-bit LE word at offset 0x34. Unlike the T76 (which
+		 * sends the 1..9 level as an enum and lets the firmware pick the
+		 * mA), the T48/T56 firmware expects the RAW calibrated trip code
+		 * here, so the level is mapped to that value. 0 = firmware
+		 * default. Levels 1..9 select 120/150/180/200/220/250/300/350/
+		 * 400 mA nominal (raw 130/150/180/200/220/250/300/335/400).
+		 * Raising it helps in-circuit work, where the whole board loads
+		 * the VCC rail and trips the default limit ("Overcurrent
+		 * protection!"); the hardware OVC protection stays active, just
+		 * at the higher trip point. Set it with `-o ovc_level`. */
+		if (handle->cmdopts->ovc_level) {
+			static const uint16_t ovc_imax[] = {
+				0, 130, 150, 180, 200, 220, 250, 300, 335, 400
+			};
+			uint8_t lvl = handle->cmdopts->ovc_level;
+			if (lvl > 9)
+				lvl = 9;
+			format_int(&msg[0x34], ovc_imax[lvl], 2,
+				   MP_LITTLE_ENDIAN);
+		}
+
 		if (msg_send(handle->usb_handle, msg, sizeof(msg)))
 			return EXIT_FAILURE;
 	} else {

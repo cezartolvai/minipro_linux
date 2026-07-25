@@ -171,12 +171,14 @@ For T56: 8, 16, 25, 50.
 For T76: 4, 8, 16, 24, 30, 40, 50, 60 (for SPI25F devices) or 0.5, 1, 2, 3, 4 (for other SPI devices).
 .TP
 .B \-o ovc_level=<0..9>
-T76 only. Set the over-current (Vcc Imax) trip level. 0 (default) uses the
-programmer's firmware default limit; 1..9 select 120, 150, 180, 200, 220,
+T76, T48 and T56. Set the over-current (Vcc Imax) trip level. 0 (default) uses
+the programmer's firmware default limit; 1..9 select 120, 150, 180, 200, 220,
 250, 300, 350 and 400 mA respectively. Raising it is useful for in-circuit
 programming, where the whole board loads the Vcc rail and trips the default
 limit ("Overcurrent protection!"). The hardware over-current protection stays
-active, just at the higher trip point. May also be set via the
+active, just at the higher trip point. On the T76 the level is sent as-is and
+the firmware picks the current; on the T48/T56 the level maps to a raw
+calibrated trip code. On the T76 it may also be set via the
 .B T76_OVC_LEVEL
 environment variable.
 
