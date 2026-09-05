@@ -1350,7 +1350,8 @@ int t76_spi_autodetect(minipro_handle_t *handle, uint8_t type,
 	uint8_t msg[64] = { 0 };
 	msg[0] = T76_AUTODETECT;
 	msg[8] = type;
-	if (msg_send(handle->usb_handle, msg, 10))
+	/* Unlike earlier programmers, T76 expects a 12-byte request. */
+	if (msg_send(handle->usb_handle, msg, 12))
 		return EXIT_FAILURE;
 	if (msg_recv(handle->usb_handle, msg, 16))
 		return EXIT_FAILURE;
