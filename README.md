@@ -23,6 +23,17 @@ which is the license upstream uses.  See `LICENSE` for the license text and
 `debian/copyright` for the file-by-file notice.  Upstream remains the place to
 take engine bugs and engine patches to.
 
+The remotes are named for that relationship: `origin` is this fork and
+`upstream` is the GitLab project.  To bring the fork up to date with engine
+work, merge upstream and re-run the suite before publishing:
+
+```nohighlight
+git fetch upstream
+git merge upstream/master
+make gui-test
+git push origin master
+```
+
 
 ## Features
 * Native support for Linux, BSD, macOS, and other flavors of Unix.
