@@ -198,22 +198,34 @@ class Ledger:
         """Report the recorded pids that are still running."""
         return [pid for pid, _ in self.entries if process_exists(pid)]
 
+    def claim_children(self):
+        """Record every child of a process this ledger owns, under its own stamp.
+
+        Children are found by walking the process table, which names a pid but
+        says nothing about who owns it.  Recording each one under the creation
+        time the kernel gave it means the same ownership test guards a child as
+        guards the process a test started.
+        """
+        for pid, _ in self.owned():
+            for child in descendants(pid):
+                if child not in self.pids:
+                    self.entries.append((child, process_start_stamp(child)))
+
     def reap(self):
         """Stop the recorded processes that are still ours, and only those.
 
-        One entry is dropped as soon as its pid stops belonging to the process
-        it was recorded for, so a later cleanup pass can never signal a number
-        the operating system handed to an unrelated process.
+        Ownership is re-checked immediately before every signal, and an entry is
+        dropped as soon as its pid stops belonging to the process it was
+        recorded for, so a cleanup pass can never signal a number the operating
+        system handed to an unrelated process.
         """
-        targets = []
-        for pid, stamp in self.owned():
-            targets.extend(descendants(pid))
-            targets.append(pid)
-        for pid in targets:
+        self.claim_children()
+        for pid, _ in self.owned():
             kill_process(pid, signal.SIGTERM)
         self.prune()
         deadline = time.monotonic() + 5.0
         while time.monotonic() < deadline:
+            self.claim_children()
             remaining = self.owned()
             if not remaining:
                 break
@@ -1532,6 +1544,37 @@ class ProcessIsolationChecks(unittest.TestCase):
                         "cleanup stopped a process whose owner it could not prove")
         self.assertEqual(ledger.unidentified(), [running.pid],
                          "a survivor this run could not identify went unreported")
+
+
+    def test_a_child_is_claimed_under_its_own_identity_before_it_is_stopped(self):
+        """A child is recorded under its own identity before it is stopped.
+
+        Walking the process table names a pid but says nothing about who owns
+        it.  A cleanup pass that stops a child only because it hangs below one
+        of our processes trusts the process table to still be telling the truth
+        a moment later, so the child is recorded under the creation time the
+        kernel gave it and guarded by the same ownership test as its parent.
+        """
+        parent = subprocess.Popen(["/bin/sh", "-c", "sleep 30 & sleep 30"],
+                                  stdout=subprocess.DEVNULL,
+                                  stderr=subprocess.DEVNULL)
+        self.addCleanup(self.finish, parent)
+        children = []
+        deadline = time.monotonic() + 10.0
+        while time.monotonic() < deadline and not children:
+            children = descendants(parent.pid)
+            if not children:
+                time.sleep(0.02)
+        self.assertTrue(children, "the stand-in started no child to claim")
+        ledger = Ledger()
+        ledger.note(parent.pid)
+        self.assertEqual(ledger.reap(), [],
+                         "a cleanup pass left a recorded process running")
+        self.assertFalse(process_exists(parent.pid),
+                         "the process a test recorded survived its own cleanup")
+        for child in children:
+            self.assertFalse(process_exists(child),
+                             "a child survived a cleanup that reached its parent")
 
 
 class DatabaseHomeChecks(WindowCase):
