@@ -1,5 +1,19 @@
 # minipro
-## Latest "stable" version 0.7.4
+
+## Experimental fork - testing in progress
+
+This fork, and the PyQt5 front-end it adds, are **experimental**.  The regression
+suite in `gui/tests/` drives the real window headlessly and covers a good deal of
+its behaviour, but automated tests are not a guarantee on real hardware: the
+front-end has not been verified against every programmer and target chip this
+project supports.  Back up the contents of any chip before a write or erase
+operation and verify the result independently.  Feedback, test reports and bug
+reports are welcome.
+
+The version number below is the upstream release this fork is based on.  It says
+nothing about the maturity of the front-end added here.
+
+## Upstream version 0.7.4
 
 An open source program for controlling XGecu's series of chip programmers.
 
@@ -266,7 +280,9 @@ with the MIT License (https://opensource.org/license/MIT)
 
 A PyQt5 front-end for the command-line program lives in `gui/`.  It drives the
 same `minipro` engine and adds no device access of its own, so everything the
-command line can do is reachable through it.
+command line can do is reachable through it.  This front-end is experimental;
+see the notice near the top of this file before using it on hardware you care
+about.
 
 ### Running the front-end
 
