@@ -1,0 +1,34 @@
+name: gui
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  gui-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install build and test dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential \
+            pkg-config \
+            libusb-1.0-0-dev \
+            python3-pyqt5
+
+      - name: Build the engine
+        run: make
+
+      - name: Run the sealed front-end checks
+        env:
+          QT_QPA_PLATFORM: offscreen
+        run: make gui-test
+
+      - name: Run the engine database checks
+        env:
+          QT_QPA_PLATFORM: offscreen
+          MINIPRO_TEST_ENGINE: "1"
+        run: make gui-test

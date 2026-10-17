@@ -136,6 +136,9 @@ library: $(VERSION_STRINGS) $(COMMON_OBJECTS)
 	ar ru $(STATIC_LIB) $(VERSION_OBJ) $(COMMON_OBJECTS)
 	ranlib $(STATIC_LIB)
 
+gui-test:
+	@python3 gui/tests/minipro_regression.py
+
 clean:
 	rm -f $(OBJECTS) $(PROGS)
 	rm -f $(STATIC_LIB)
@@ -214,4 +217,4 @@ else
 endif
 
 
-.PHONY: all dist distclean clean install install-algorithm test version-info
+.PHONY: all dist distclean clean install install-algorithm test version-info gui-test

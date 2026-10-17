@@ -19,10 +19,12 @@ information and logs.  Command line rules mirror src/main.c of that engine:
 """
 
 import argparse
+import codecs
 import os
 import re
 import shlex
 import sys
+import time
 from shutil import which
 
 from PyQt5 import QtCore, QtWidgets
@@ -72,6 +74,12 @@ OVC_LEVELS = ((0, "Implicit (din firmware)"),) + tuple(
 
 # Shown by every override control when minipro should pick the value itself.
 IMPLICIT = "Implicit (valoarea din cip)"
+
+# How long a cancelled engine call gets to stop before it is killed, and how
+# long a closing window waits for that to happen.
+CANCEL_GRACE_MS = 3000
+CLOSE_GRACE_MS = 4000
+CLOSE_KILL_GRACE_MS = 2000
 
 # minipro writes progress as "\r\e[K<label><percent>%" records on stderr.
 ANSI_RE = re.compile(r"\x1b\[[0-9;?]*[A-Za-z]")
@@ -126,11 +134,13 @@ ICSP_VALUES = (
     ("-I", "ICSP fara VCC (-I)"),
 )
 
-# File size handling: -s ignores the difference, -S only hides the warning.
+# File size handling: -s ignores the difference, while -S makes main.c treat a
+# size difference as size_nowarn plus size_error, so it does not merely hide a
+# warning: the operation continues with a file of a different size.
 SIZE_MODES = (
     (None, "Eroare la diferenta de marime"),
-    ("-s", "Ignora diferenta (-s)"),
-    ("-S", "Fara avertisment (-S)"),
+    ("-s", "Ignora diferenta de marime (-s)"),
+    ("-S", "Continua cu alta marime, fara avertisment (-S)"),
 )
 
 
@@ -254,23 +264,45 @@ class Runner(QtCore.QObject):
     stdout is kept for the device list.  Progress records arrive as
     "\\r\\e[K<label><percent>%" fragments, so records are split on carriage
     returns and on newlines before the ANSI escapes are removed.
+
+    Two details matter over a long call.  A UTF-8 character can be split across
+    two reads, so the bytes are decoded through one incremental decoder instead
+    of one chunk at a time.  And the kept text is capped: a call that writes
+    megabytes of progress reports the cap instead of growing the front-end
+    without end.
     """
 
     progress = QtCore.pyqtSignal(int)
     log_line = QtCore.pyqtSignal(str)
     done = QtCore.pyqtSignal(int, str)
 
+    # Characters kept per channel for one finished call.
+    CAPTURE_LIMIT = 1 << 20
+
     def __init__(self):
         super().__init__()
         self.stdout_text = ""
         self.stderr_text = ""
+        self.captured_truncated = False
+        self.captured_limit = self.CAPTURE_LIMIT
         self._partial = ""
+        # stdout and stderr are two independent byte streams, so each gets its
+        # own incremental decoder: a character split across two reads must stay
+        # in the channel it came from instead of leaking into the other one.
+        self._stdout_decoder = self._new_decoder()
+        self._stderr_decoder = self._new_decoder()
         self.reported = True
         self.cancelled = False
+        self._generation = 0
         self._proc = None
         self._kill = QtCore.QTimer(self)
         self._kill.setSingleShot(True)
         self._kill.timeout.connect(self._force_kill)
+
+    @staticmethod
+    def _new_decoder():
+        """Build one incremental UTF-8 decoder for one channel of one call."""
+        return codecs.getincrementaldecoder("utf-8")("replace")
 
     # ------------------------------------------------------------- lifecycle
     def start(self, binary, args, label, home=None):
@@ -279,7 +311,10 @@ class Runner(QtCore.QObject):
             return False
         self.stdout_text = ""
         self.stderr_text = ""
+        self.captured_truncated = False
         self._partial = ""
+        self._stdout_decoder = self._new_decoder()
+        self._stderr_decoder = self._new_decoder()
         self.cancelled = False
         self.reported = False
         self.progress.emit(-1)
@@ -297,10 +332,18 @@ class Runner(QtCore.QObject):
         # minipro asks on the terminal when it cannot find a programmer; a
         # closed input makes it fail here instead of waiting inside the GUI.
         process.setStandardInputFile(os.devnull)
-        process.readyReadStandardOutput.connect(self._on_stdout)
-        process.readyReadStandardError.connect(self._on_stderr)
-        process.finished.connect(self._on_finished)
-        process.errorOccurred.connect(self._on_error)
+        # Every callback names the call it belongs to, so a late record from a
+        # process this runner already dropped cannot touch the current one.
+        self._generation += 1
+        generation = self._generation
+        process.readyReadStandardOutput.connect(
+            lambda: self._on_stdout(generation))
+        process.readyReadStandardError.connect(
+            lambda: self._on_stderr(generation))
+        process.finished.connect(lambda code, status: self._on_finished(
+            generation, code, status))
+        process.errorOccurred.connect(
+            lambda error: self._on_error(generation, error=error))
         self._proc = process
         process.start()
         return True
@@ -310,84 +353,152 @@ class Runner(QtCore.QObject):
         return (self._proc is not None and not self.reported and
                 self._proc.state() != QtCore.QProcess.NotRunning)
 
+    def process_id(self):
+        """Return the system id of the running engine call, or None."""
+        if self._proc is None or \
+                self._proc.state() == QtCore.QProcess.NotRunning:
+            return None
+        return int(self._proc.processId())
+
     def cancel(self):
-        """Ask minipro to stop, then kill it when it refuses."""
+        """Ask minipro to stop, arming the escalation only once."""
         if not self.running():
             return False
-        self.log_line.emit("Anulare: se opreste minipro...")
+        if not self.cancelled:
+            self.log_line.emit("Anulare: se opreste minipro...")
         self.cancelled = True
         self._proc.terminate()
-        self._kill.start(3000)
+        if not self._kill.isActive():
+            # A second click must not keep pushing the kill deadline forward.
+            self._kill.start(CANCEL_GRACE_MS)
         return True
 
-    def wait(self, timeout_ms=3000):
-        """Wait for the process, escalating to a kill when it will not stop."""
-        if self._proc is None:
-            return True
-        if self._proc.waitForFinished(int(timeout_ms)):
-            return True
-        self._force_kill()
-        return self._proc.waitForFinished(int(timeout_ms))
-
-    def _force_kill(self):
+    def force_kill(self):
         """Kill a minipro process that ignored the terminate request."""
         if self._proc is not None and \
                 self._proc.state() != QtCore.QProcess.NotRunning:
             self._proc.kill()
 
+    def _force_kill(self):
+        """Escalate a cancel whose grace period ran out."""
+        self.force_kill()
+
+    def _release(self):
+        """Drop a finished process so repeated calls do not pile up children."""
+        process, self._proc = self._proc, None
+        if process is None:
+            return
+        for channel in (process.readyReadStandardOutput,
+                        process.readyReadStandardError, process.finished,
+                        process.errorOccurred):
+            try:
+                channel.disconnect()
+            except (TypeError, RuntimeError):
+                pass
+        process.deleteLater()
+
     # ------------------------------------------------------------ callbacks
-    def _on_stdout(self):
+    def _current(self, generation):
+        """Report whether one callback still belongs to the live call."""
+        return generation == self._generation and self._proc is not None
+
+    def _decode_stdout(self, chunk, final=False):
+        """Decode stdout bytes through the decoder of the stdout channel."""
+        return self._stdout_decoder.decode(bytes(chunk), final)
+
+    def _decode_stderr(self, chunk, final=False):
+        """Decode stderr bytes through the decoder of the stderr channel."""
+        return self._stderr_decoder.decode(bytes(chunk), final)
+
+    def _read_stdout(self):
+        """Return the stdout bytes of the live process."""
+        return b"" if self._proc is None else bytes(
+            self._proc.readAllStandardOutput())
+
+    def _read_stderr(self):
+        """Return the stderr bytes of the live process."""
+        return b"" if self._proc is None else bytes(
+            self._proc.readAllStandardError())
+
+    def _on_stdout(self, generation):
         """Collect listings, which minipro writes to stdout."""
-        self.stdout_text += bytes(self._proc.readAllStandardOutput()).decode(
-            "utf-8", "replace")
+        if not self._current(generation):
+            return
+        self.stdout_text = self._capture(self.stdout_text, self._decode_stdout(
+            self._read_stdout()))
 
-    def _on_stderr(self):
+    def _on_stderr(self, generation):
         """Feed progress and diagnostics to the log and the progress bar."""
-        self._feed(self._proc.readAllStandardError())
+        if not self._current(generation):
+            return
+        self._feed(self._read_stderr())
 
-    def _on_finished(self, exit_code, exit_status):
+    def _on_finished(self, generation, exit_code, exit_status):
         """Turn one engine exit into the exit code shown to the user."""
+        if not self._current(generation):
+            return
         if exit_status == QtCore.QProcess.NormalExit:
             self._finish(int(exit_code))
         else:
             self._finish(1)
 
-    def _on_error(self, error):
-        """Report a process that never started; other errors end the run."""
+    def _on_error(self, generation, error):
+        """Report a process that never started; other errors end via finished."""
+        if not self._current(generation):
+            return
         if error == QtCore.QProcess.FailedToStart:
             self.log_line.emit("Nu am putut porni procesul minipro.")
             self._finish(127)
+        elif error == QtCore.QProcess.Timedout:
+            self.log_line.emit("Procesul minipro nu a raspuns la timp.")
 
     def _finish(self, exit_code):
         """Report completion once, after the last output was drained."""
         if self.reported:
             return
         self.reported = True
+        self._generation += 1
         self._kill.stop()
-        self.stdout_text += bytes(self._proc.readAllStandardOutput()).decode(
-            "utf-8", "replace")
-        self._feed(self._proc.readAllStandardError())
+        # Each channel is drained and finalized on its own: the trailing bytes
+        # of one stream belong to that channel and to no other channel.
+        self.stdout_text = self._capture(self.stdout_text, self._decode_stdout(
+            self._read_stdout(), final=True))
+        self._feed(self._read_stderr())
         self._flush_pending()
+        if self.captured_truncated:
+            self.log_line.emit("Jurnalul operatiei a fost trunchiat la %d "
+                               "caractere." % self.captured_limit)
         self.progress.emit(100 if exit_code == 0 else 0)
         self.done.emit(int(exit_code), self.stdout_text)
+        self._release()
 
     # -------------------------------------------------------------- internals
+    def _capture(self, current, text):
+        """Append captured text, never past the cap this runner keeps."""
+        room = max(0, self.captured_limit - len(current))
+        if len(text) > room:
+            self.captured_truncated = True
+            return current + text[:room]
+        return current + text
+
     def _feed(self, chunk):
         """Split one stderr chunk into the records minipro writes."""
         if not chunk:
             return
-        text = self._partial + bytes(chunk).decode("utf-8", "replace")
+        text = self._partial + self._decode_stderr(chunk, False)
         records = re.split(r"[\r\n]", text)
         self._partial = records.pop()
         for record in records:
-            self.stderr_text += record + "\n"
+            self.stderr_text = self._capture(self.stderr_text, record + "\n")
             self._report(strip_ansi(record))
 
     def _flush_pending(self):
         """Report a final record that minipro did not terminate itself."""
+        self._partial += self._decode_stderr(b"", final=True)
         if self._partial:
             tail = strip_ansi(self._partial)
-            self.stderr_text += self._partial + "\n"
+            self.stderr_text = self._capture(self.stderr_text,
+                                             self._partial + "\n")
             self._partial = ""
             self._report(tail)
 
@@ -504,6 +615,19 @@ class MiniproGui(QtWidgets.QMainWindow):
         grid.addWidget(self.autodetect_combo, 3, 0)
         grid.addWidget(self.autodetect_button, 3, 1)
         grid.addWidget(self.list_button, 3, 2)
+
+        # Values read out of one chip record belong to that chip alone, so
+        # changing the chip or the database it came from invalidates them.
+        self.chip_overrides_for = None
+        self.chip_overrides_from = None
+        # The database one chip record was actually queried from, recorded when
+        # the query is built instead of when it finishes.  Until a query runs,
+        # the values a window shows can only have come from the database it
+        # already shows, so that is where the record is attributed.
+        self.db_queried = self.db_filter.currentData()
+        self.devices.currentTextChanged.connect(self._on_chip_context_changed)
+        self.db_filter.currentIndexChanged.connect(
+            self._on_chip_context_changed)
 
         grid.setColumnStretch(1, 1)
         self.main_layout.addWidget(box)
@@ -649,8 +773,10 @@ class MiniproGui(QtWidgets.QMainWindow):
         for value, label in SIZE_MODES:
             self.size_mode.addItem(label, value)
         self.size_mode.setToolTip("-s: ignora diferenta de marime dintre "
-                                  "fisier si memorie.\n-S: afiseaza operatia "
-                                  "fara avertismentul de marime.")
+                                  "fisier si memorie.\n-S: main.c seteaza atat "
+                                  "size_nowarn cat si size_error, deci o "
+                                  "marime diferita\nnu este doar anuntata mai "
+                                  "tarziu: operatia continua cu ea.")
         grid.addWidget(self.size_mode, 4, 1)
 
         self.skip_erase = QtWidgets.QCheckBox("Sari peste stergere (-e)")
@@ -807,24 +933,73 @@ class MiniproGui(QtWidgets.QMainWindow):
         """Return the dump path exactly as it was typed."""
         return self.file.text().strip()
 
+    def _refuse(self, title, text):
+        """Report a missing requirement in the journal, then show it as a warning.
+
+        The journal is the record an operator keeps of what this window did, so
+        an action stopped before it reached the engine must be named there too
+        and not only in a dialog box that can be dismissed unread.
+        """
+        self._log("%s: %s" % (title, text))
+        QtWidgets.QMessageBox.warning(self, title, text)
+        return None
+
     def _require_device(self):
         """Refuse a device operation when no device is selected."""
         device = self.selected_device()
         if not device:
-            QtWidgets.QMessageBox.warning(
-                self, "Dispozitiv lipsa",
+            return self._refuse(
+                "Dispozitiv lipsa",
                 "Alege mai intai un dispozitiv din lista sau scrie-i numele.")
-            return None
         return device
 
-    def _require_file(self):
-        """Refuse a file operation when the dump path is empty."""
+    def _require_file(self, output=False):
+        """Refuse a file operation when the dump path is empty or unusable.
+
+        output=True marks the path as something the engine will write: minipro
+        opens a read target with "wb", which truncates whatever is already
+        there, so an existing file needs an explicit confirmation first.
+        """
         path = self.file.text().strip()
         if not path:
-            QtWidgets.QMessageBox.warning(
-                self, "Fisier lipsa", "Scrie mai intai o cale de fisier.")
-            return None
+            return self._refuse("Fisier lipsa", "Scrie mai intai o cale de fisier.")
+        if os.path.isdir(path):
+            return self._refuse("Fisier invalid",
+                                "%s este un director, nu un fisier dump." % path)
+        if output:
+            if os.path.exists(path) and not os.access(path, os.W_OK):
+                return self._refuse("Fisier protejat",
+                                    "%s exista si nu poate fi scris." % path)
+            if os.path.exists(path) and not self._confirm_dump_overwrite(path):
+                return None
         return path
+
+    def _require_readable_file(self):
+        """Refuse an action whose dump the engine must read from disk."""
+        path = self._require_file()
+        if not path:
+            return None
+        if not os.path.isfile(path):
+            return self._refuse(
+                "Fisier lipsa",
+                "%s nu exista; aceasta operatie il citeste." % path)
+        if not os.access(path, os.R_OK):
+            return self._refuse("Fisier protejat", "%s nu poate fi citit." % path)
+        return path
+
+    def _confirm_dump_overwrite(self, path):
+        """Ask before a read replaces a dump that already exists."""
+        warning = ("Citirea va inlocui %s, care exista deja (%d octeti)."
+                   % (path, os.path.getsize(path)))
+        self._log(warning)
+        answer = QtWidgets.QMessageBox.question(
+            self, "Confirmare suprascriere",
+            warning + "\n"
+            "minipro deschide fisierul pentru scriere, deci continutul actual "
+            "se pierde.\n\nContinui?",
+            QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.No,
+            QtWidgets.QMessageBox.No)
+        return answer == QtWidgets.QMessageBox.Yes
 
 
     # ------------------------------------------------------- command building
@@ -896,7 +1071,10 @@ class MiniproGui(QtWidgets.QMainWindow):
 
     def _db_args(self, extra):
         """Build the argument list for one database-only action."""
-        args = ["-q", self.db_filter.currentData()]
+        # The database named here is the one this query really reads, so it is
+        # recorded here, at the moment the query is built.
+        self.db_queried = self.db_filter.currentData()
+        args = ["-q", self.db_queried]
         args.extend(extra)
         return args
 
@@ -921,7 +1099,7 @@ class MiniproGui(QtWidgets.QMainWindow):
     def do_read(self):
         """Read one memory region into the dump file."""
         device = self._require_device()
-        path = self._require_file()
+        path = self._require_file(output=True)
         if not device or not path:
             return
         self._start(self._op_args("read", device, path), "read",
@@ -930,7 +1108,7 @@ class MiniproGui(QtWidgets.QMainWindow):
     def do_verify(self):
         """Compare one memory region with the dump file."""
         device = self._require_device()
-        path = self._require_file()
+        path = self._require_readable_file()
         if not device or not path:
             return
         self._start(self._op_args("verify", device, path), "verify",
@@ -955,7 +1133,7 @@ class MiniproGui(QtWidgets.QMainWindow):
     def do_write(self):
         """Write the dump after an explicit confirmation."""
         device = self._require_device()
-        path = self._require_file()
+        path = self._require_readable_file()
         if not device or not path:
             return
         if not self._confirm_write(path):
@@ -981,21 +1159,107 @@ class MiniproGui(QtWidgets.QMainWindow):
         self._start(["-t"], "hardware", "Test hardware")
 
     def _confirm_write(self, path):
-        """Ask once before a write, because it rewrites the chip."""
+        """Ask once before a write, naming the options the engine will get."""
+        text = ("Se va scrie %s in %s.\n\n%s" % (path, self.selected_device(),
+                                                 self._override_summary("write")))
+        # The operator may have asked for an option main.c drops for a write,
+        # so the dialog has to say that instead of leaving it unmentioned.
+        dropped = self._dropped_options("write")
+        if dropped:
+            text += "\n\n" + "\n".join(dropped)
         answer = QtWidgets.QMessageBox.question(
             self, "Confirmare scriere",
-            "Se va scrie %s in %s.\n\nContinui?" % (path,
-                                                    self.selected_device()),
+            text + "\n\nContinui?",
             QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.No,
             QtWidgets.QMessageBox.No)
         return answer == QtWidgets.QMessageBox.Yes
 
+    def _override_summary(self, action):
+        """Name every option this command line really sends for one action."""
+        parts = self._sent_options(action)
+        if not parts:
+            if self.advanced.isChecked():
+                return "Optiuni avansate: niciuna trimisa."
+            return ("Optiuni: niciuna, minipro alege regiunea si valorile "
+                    "cipului.")
+        return "Optiuni trimise: " + ", ".join(parts)
+
+    def _sent_options(self, action):
+        """Name every option _op_args really sends for one action."""
+        parts = []
+        cfg_filter = self.cfg_section.currentData()
+        if cfg_filter:
+            parts.append("-c config %s" % cfg_filter)
+        elif self.memory.currentData():
+            parts.append("-c %s" % self.memory.currentData())
+        if self.format.currentData():
+            parts.append("-f %s" % self.format.currentData())
+        if not self.advanced.isChecked():
+            return parts
+        icsp = self.icsp.currentData()
+        if icsp:
+            parts.append(icsp)
+        size = self.size_mode.currentData()
+        if size:
+            parts.append(size)
+        for combo, option in ((self.vcc, "--vcc"), (self.vdd, "--vdd"),
+                              (self.vpp, "--vpp"),
+                              (self.spi_clock, "--spi_clock")):
+            value = combo.currentText().strip()
+            if value and value != IMPLICIT:
+                parts.append("%s %s" % (option, value))
+        for field, option in ((self.pulse, "--pulse"),
+                              (self.address, "--address")):
+            value = field.text().strip()
+            if value:
+                parts.append("%s %s" % (option, value))
+        level = self.ovc.currentData()
+        if level:
+            parts.append("-o ovc_level=%d" % level)
+        for box, option in ((self.unprotect, "-u"), (self.protect, "-P"),
+                            (self.skip_blank, "-B"), (self.id_error, "-y")):
+            if box.isChecked():
+                parts.append(option)
+        if self.skip_id.isChecked() and action in SKIP_ID_ACTIONS:
+            # main.c reads -x only for these actions, so naming it for another
+            # action would name an option _op_args never sends.
+            parts.append("-x")
+        if action == "write":
+            # main.c only reads -e and -v as part of a write, so naming them
+            # for another action would name an option never sent.
+            for box, option in ((self.skip_erase, "-e"),
+                                (self.skip_verify, "-v")):
+                if box.isChecked():
+                    parts.append(option)
+        return parts
+
+    def _dropped_options(self, action):
+        """Name the options this window was asked for and will not send."""
+        dropped = []
+        if (self.advanced.isChecked() and self.skip_id.isChecked() and
+                action not in SKIP_ID_ACTIONS):
+            # _op_args only reaches this box when the advanced options are
+            # open, so a box left closed behind an open group is not dropped:
+            # it was never asked for in the first place.
+            dropped.append("Optiunea \"Nu citi ID-ul\" nu este trimisa: "
+                          "main.c o refuza pentru aceasta operatie.")
+        return dropped
+
     def _confirm_erase(self):
-        """Ask twice before an erase, which cannot be undone."""
+        """Ask twice before an erase, naming the options it really sends.
+
+        main.c never reads the chosen region when it erases: the ERASE action
+        calls erase_device(), and that never reads the chosen page.  So the
+        region shown here must not read as something that limits the erase.
+        """
+        warning = ("Stergerea distruge tot continutul cipului %s.\n%s\n"
+                   "Regiunea aleasa nu limiteaza stergerea: main.c nu o "
+                   "consultă când sterge."
+                   % (self.selected_device(), self._override_summary("erase")))
+        self._log(warning)
         first = QtWidgets.QMessageBox.warning(
             self, "Confirmare stergere",
-            "Stergerea distge tot continutul cipului %s.\n\nContinui?"
-            % self.selected_device(),
+            warning + "\n\nContinui?",
             QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.No,
             QtWidgets.QMessageBox.No)
         if first != QtWidgets.QMessageBox.Yes:
@@ -1074,6 +1338,14 @@ class MiniproGui(QtWidgets.QMainWindow):
         else:
             self.status.setText("%s esuata (cod %d)." % (label, exit_code))
             self._log("%s esuata, cod de iesire %d." % (label, exit_code))
+        if exit_code != 0:
+            # A failed call produced no listing and no chip record, so anything
+            # still on screen comes from an earlier call that did succeed.
+            if action in ("list", "search", "autodetect", "info", "version",
+                          "presence"):
+                self._log("Vederile ramane cele ale unei operatii anterioare: "
+                          "aceasta nu a produs date.")
+            return
         if action in ("list", "search", "autodetect"):
             self.apply_device_list(stdout_text)
         elif action == "info":
@@ -1087,6 +1359,12 @@ class MiniproGui(QtWidgets.QMainWindow):
         """Fill the device combo from one minipro listing, keeping the choice."""
         names = [line.strip() for line in text.splitlines() if line.strip()]
         if not names:
+            # An empty listing must not leave the previous list on screen: an
+            # operator would read chips that this call never reported.
+            self.devices.blockSignals(True)
+            self.devices.clear()
+            self.devices.blockSignals(False)
+            self._on_chip_context_changed()
             self._log("Niciun cip gasit in baza de date selectata.")
             return
         current = self.devices.currentText()
@@ -1098,6 +1376,9 @@ class MiniproGui(QtWidgets.QMainWindow):
         if position >= 0:
             self.devices.setCurrentIndex(position)
         self.devices.blockSignals(False)
+        # The refill kept the signals closed, so the chip context is checked
+        # here instead: a list that no longer holds the old chip invalidates it.
+        self._on_chip_context_changed()
         self._log("%d dispozitive in lista." % len(names))
 
     def _device_from_line(self, line):
@@ -1111,21 +1392,50 @@ class MiniproGui(QtWidgets.QMainWindow):
         """Fill the override lists from one chip record.
 
         The record itself was already streamed to the journal record by record
-        while the engine wrote it, so the journal is kept intact here.
+        while the engine wrote it, so the journal is kept intact here.  The
+        lists filled here belong to the chip this record names: they are remembered
+        as belonging to it so a later chip change drops them.
         """
         text = strip_ansi(text)
+        chip = None
         for line in text.splitlines():
             if line.startswith("Name:"):
                 name = self._device_from_line(line)
-                if name and self.devices.findText(name) < 0:
+                if not name:
+                    continue
+                chip = name
+                if self.devices.findText(name) < 0:
                     self.devices.addItem(name)
-                    self.devices.setCurrentIndex(self.devices.findText(name))
+                self.devices.setCurrentIndex(self.devices.findText(name))
         for combo, header in ((self.spi_clock,
                                "Available SPI clock frequencies [MHz]:"),
-                               (self.vpp, "Available VPP voltages [V]:"),
-                               (self.vdd, "Available VDD write voltages [V]:"),
-                               (self.vcc, "Available VCC verify voltages [V]:")):
+                              (self.vpp, "Available VPP voltages [V]:"),
+                              (self.vdd, "Available VDD write voltages [V]:"),
+                              (self.vcc, "Available VCC verify voltages [V]:")):
             self._fill_combo(combo, parse_available_values(text, header))
+        self.chip_overrides_for = chip or self.selected_device()
+        # The record was queried from the database named when the call started,
+        # not from whichever one is selected now: db_filter stays reachable
+        # while the engine runs, so reading it here would attribute the values
+        # of one database to another.
+        self.chip_overrides_from = self.db_queried
+
+    def _on_chip_context_changed(self, *args):
+        """Drop chip values when the chip or the database behind them changes."""
+        if self.chip_overrides_for is None:
+            return
+        if self.chip_overrides_for != self.selected_device():
+            self._reset_chip_overrides("cipul selectat s-a schimbat")
+        elif self.chip_overrides_from != self.db_filter.currentData():
+            self._reset_chip_overrides("baza de date selectata s-a schimbat")
+
+    def _reset_chip_overrides(self, reason):
+        """Return every chip-specific override to the database default."""
+        for combo in (self.vcc, self.vdd, self.vpp, self.spi_clock):
+            self._fill_combo(combo, ())
+        self.chip_overrides_for = None
+        self.chip_overrides_from = None
+        self._log("Suprascrierile cipului au fost resetate: %s." % reason)
 
     def _fill_combo(self, combo, values):
         """Fill one override combo with the values of the selected chip."""
@@ -1134,6 +1444,7 @@ class MiniproGui(QtWidgets.QMainWindow):
             combo.removeItem(1)
         for value in values:
             combo.addItem(value)
+        combo.setCurrentIndex(0)
         combo.blockSignals(False)
 
 
@@ -1200,12 +1511,14 @@ class MiniproGui(QtWidgets.QMainWindow):
             self.update_file_info()
 
     def update_file_info(self):
-        """Report the size of the chosen dump file, or that it is missing."""
+        """Report the size of the chosen dump file, or why it is unusable."""
         path = self.file_path()
         if not path:
             self.file_info.setText("fara fisier")
             return
-        if os.path.isfile(path):
+        if os.path.isdir(path):
+            self.file_info.setText("calea este un director")
+        elif os.path.isfile(path):
             self.file_info.setText("%d octeti" % os.path.getsize(path))
         else:
             self.file_info.setText("fisier inexistent")
@@ -1217,7 +1530,7 @@ class MiniproGui(QtWidgets.QMainWindow):
             self.status.setText("Nu exista nicio operatie in desfasurare.")
 
     def closeEvent(self, event):
-        """Stop the engine before the window disappears."""
+        """Stop the engine, and only close once it really stopped."""
         if self.runner.running():
             answer = QtWidgets.QMessageBox.question(
                 self, "Iesire",
@@ -1229,8 +1542,31 @@ class MiniproGui(QtWidgets.QMainWindow):
                 event.ignore()
                 return
             self.runner.cancel()
-            self.runner.wait(4000)
+            if not self._await_process_exit():
+                QtWidgets.QMessageBox.critical(
+                    self, "Iesire refuzata",
+                    "Procesul minipro nu s-a oprit nici dupa kill. "
+                    "Fereastra ramane deschisa ca sa nu il pierzi.")
+                event.ignore()
+                return
         event.accept()
+
+    def _await_process_exit(self):
+        """Wait for the cancelled engine, escalating to a kill once."""
+        if self._wait_for_stop(CLOSE_GRACE_MS):
+            return True
+        self.runner.force_kill()
+        return self._wait_for_stop(CLOSE_KILL_GRACE_MS)
+
+    def _wait_for_stop(self, timeout_ms):
+        """Pump the event loop until the engine call is gone."""
+        deadline = time.monotonic() + timeout_ms / 1000.0
+        while time.monotonic() < deadline:
+            QtWidgets.QApplication.processEvents()
+            if not self.runner.running():
+                return True
+            time.sleep(0.02)
+        return not self.runner.running()
 
 
 def main():

@@ -235,3 +235,67 @@ Code and data for testing ICs have been borrowed from
 https://github.com/Johnlon/integrated-circuit-tester and
 https://github.com/akshaybaweja/Smart-IC-Tester and used in accordance
 with the MIT License (https://opensource.org/license/MIT)
+
+## GUI front-end
+
+A PyQt5 front-end for the command-line program lives in `gui/`.  It drives the
+same `minipro` engine and adds no device access of its own, so everything the
+command line can do is reachable through it.
+
+### Running the front-end
+
+Build the engine first, then start the front-end from the source tree:
+
+```nohighlight
+make
+python3 gui/minipro_gui.py
+```
+
+The engine is looked for beside the front-end, in the directory above it, and
+in the usual install locations.  A build kept elsewhere is named with
+`--binary`:
+
+```nohighlight
+python3 gui/minipro_gui.py --binary ../build/minipro
+```
+
+The chip databases are taken from the directory named by `MINIPRO_HOME`, or
+from the directory the engine was found in.
+
+### Installing PyQt5
+
+The front-end needs Python 3 and PyQt5.
+
+On Debian or Ubuntu:
+```nohighlight
+sudo apt install python3-pyqt5
+```
+
+On Fedora:
+```nohighlight
+sudo dnf install python3-qt5
+```
+
+On macOS:
+```nohighlight
+brew install pyqt5
+```
+
+### Testing the front-end
+
+```nohighlight
+make gui-test                         sealed checks, no hardware involved
+MINIPRO_TEST_ENGINE=1 make gui-test   plus the engine database checks
+```
+
+The suite drives the real window headlessly and answers every dialog the window
+raises, so it needs no display of its own.  On a machine with no display at all,
+name the platform Qt should use:
+
+```nohighlight
+QT_QPA_PLATFORM=offscreen make gui-test
+```
+
+Every process a run starts is recorded with the creation time its process number
+was born with, so cleanup reaches only the processes that run started and never
+a process number the operating system handed to something else.
