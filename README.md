@@ -9,6 +9,21 @@ simple, free, and open-source program that presents a command-line
 interface that allows for a GUI front-end if desired.
 
 
+## This repository
+
+This is a fork of [minipro](https://gitlab.com/DavidGriffith/minipro), taken at
+upstream commit `3e2f491` ("Fix T76 SPI autodetect request length", 2026-09-05).
+The engine, its chip databases, its documentation and its packaging are
+unchanged from upstream.  What this fork adds is the PyQt5 front-end in `gui/`,
+the regression suite that guards it, the `make gui-test` target that runs it,
+and a CI job that runs it headlessly on every push.
+
+Everything here stays under the GNU General Public License version 3 or later,
+which is the license upstream uses.  See `LICENSE` for the license text and
+`debian/copyright` for the file-by-file notice.  Upstream remains the place to
+take engine bugs and engine patches to.
+
+
 ## Features
 * Native support for Linux, BSD, macOS, and other flavors of Unix.
 * Compatibility with TL866CS, TL866A, TL866II+, T48, and T56 from XGecu

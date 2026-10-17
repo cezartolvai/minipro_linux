@@ -1,3 +1,10 @@
+# This file is a part of the minipro project
+# https://gitlab.com/DavidGriffith/minipro/
+#
+# Minipro is free software; you can redistribute it and/or modify
+# it under the terms of the GNU General Public License as published by
+# the Free Software Foundation; either version 3 of the License, or
+# (at your option) any later version.
 """Regression checks for the front-end defects that were remediated.
 
 Each block names the defect it guards against, so a change that reintroduces
