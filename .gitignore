@@ -17,3 +17,7 @@ debian/minipro.substvars
 # editor backups
 .*~
 *~
+
+# python bytecode from the gui regression suite
+__pycache__/
+*.pyc
