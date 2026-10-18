@@ -63,6 +63,16 @@ APP = QtWidgets.QApplication(sys.argv)
 # One private directory for everything this run writes, removed when it ends.
 WORKSPACE = tempfile.mkdtemp(prefix="minipro-gui-test-")
 
+# The window remembers the language its operator chose, so this suite has to
+# choose one before its first window is built: every expectation below was
+# written against the Romanian window, and the language checks switch away from
+# it and back on purpose.  QSettings is pointed at the private directory first,
+# so a test run never reads or writes the settings of the person running it.
+QtCore.QSettings.setDefaultFormat(QtCore.QSettings.IniFormat)
+QtCore.QSettings.setPath(QtCore.QSettings.IniFormat,
+                         QtCore.QSettings.UserScope, WORKSPACE)
+mg.store_language("ro")
+
 
 def process_fields(pid):
     """Return the fields of one kernel record after its comm field, or None.
@@ -561,7 +571,7 @@ class CommandLineChecks(WindowCase):
         arguments = self.window._op_args("read", "W25Q16@SOIC8")
         position = arguments.index("-c")
         self.assertEqual(arguments[position + 1], "config")
-        self.assertIn("Filtrul de config forțează -c config.",
+        self.assertIn(mg.tr("journal.config_forces"),
                       window_journal(self.window))
 
     def test_a_memory_region_is_sent_verbatim_as_main_c_expects_it(self):
@@ -903,11 +913,11 @@ class ChipContextChecks(WindowCase):
         self.assertEqual(self.window.devices.currentText(), "W25Q16@SOIC8")
         self.assertEqual(self.window.chip_overrides_for, "W25Q16@SOIC8")
         self.assertEqual(self.window.vpp.count(), 3)
-        self.assertEqual(self.window.vpp.itemText(0), mg.IMPLICIT)
+        self.assertEqual(self.window.vpp.itemText(0), mg.implicit_text())
         self.assertIn("12.5", self.window.vpp.itemText(2))
         # The record names the chip's own values; it does not pick one for the
         # operator, so a read still lets minipro use the database values.
-        self.assertEqual(self.window.vpp.currentText(), mg.IMPLICIT)
+        self.assertEqual(self.window.vpp.currentText(), mg.implicit_text())
 
     def test_a_plain_read_never_sends_a_value_borrowed_from_another_chip(self):
         self.window.apply_chip_info(CHIP_RECORD)
@@ -1670,6 +1680,201 @@ class EngineDatabaseChecks(unittest.TestCase):
         self.assertEqual(mg.database_home(engine), os.path.abspath(ROOT))
 
 
+class LanguageChecks(WindowCase):
+    """The experimental warning and the language the window speaks.
+
+    Both are promises the window makes about itself: it never hides that it is
+    experimental, and it answers in the language its operator chose.  A check
+    that only reads the table would miss a control that was never registered,
+    so these checks read the built window.
+    """
+
+    binary = SLOW_STUB
+
+    def tearDown(self):
+        # The suite drives the Romanian window, so a check that switched away
+        # from it hands it back before the next one builds its window.
+        mg.set_language("ro")
+        mg.store_language("ro")
+        super().tearDown()
+
+    def test_the_window_shows_its_experimental_warning_from_the_start(self):
+        banner = self.window.experimental_banner
+        self.assertEqual(banner.objectName(), "experimentalBanner")
+        self.assertEqual(banner.text(), mg.text_for("banner.experimental", "ro"))
+        # The warning is part of the first thing the window lays out, so it is
+        # above the write and erase buttons instead of somewhere to scroll to.
+        self.assertIs(self.window.main_layout.itemAt(0).widget(), banner)
+        self.assertTrue(banner.isEnabled())
+        self.assertFalse(banner.isHidden())
+
+    def test_the_banner_survives_a_language_switch(self):
+        self.assertTrue(self.window.choose_language("en"))
+        self.assertEqual(self.window.experimental_banner.text(),
+                         mg.text_for("banner.experimental", "en"))
+        self.assertTrue(self.window.experimental_banner.isEnabled())
+
+    def test_the_banner_stays_readable_while_an_operation_runs(self):
+        self.choose_chip()
+        self.start(self.window.do_read)
+        self.assertTrue(self.window.runner.running(), "the call already ended")
+        self.assertFalse(self.window.read_button.isEnabled(),
+                         "the controls were not locked while the call ran")
+        self.assertTrue(self.window.experimental_banner.isEnabled(),
+                        "the warning went away for the one moment it matters")
+        self.assertFalse(self.window.experimental_banner.isHidden())
+        self.assertEqual(self.window.experimental_banner.text(),
+                         mg.text_for("banner.experimental", "ro"))
+        self.settle(self.window)
+
+    def test_switching_language_retitles_the_window_and_its_controls(self):
+        before = len(self.window.menuBar().actions())
+        self.assertTrue(self.window.choose_language("en"))
+        self.assertEqual(self.window.windowTitle(),
+                         mg.text_for("window.title", "en"))
+        self.assertEqual(self.window.read_button.text(),
+                         mg.text_for("action.read", "en"))
+        self.assertEqual(self.window.advanced.title(),
+                         mg.text_for("box.advanced", "en"))
+        self.assertEqual(self.window.operations_menu.menuAction().text(),
+                         mg.text_for("menu.operations", "en"))
+        # Rebuilding the menus must replace them, never stack a second set.
+        self.assertEqual(len(self.window.menuBar().actions()), before)
+        # Asking for the language it already speaks changes nothing.
+        self.assertFalse(self.window.choose_language("en"))
+
+    def test_switching_language_keeps_what_the_operator_had_chosen(self):
+        pick(self.window.icsp, "-i")
+        pick(self.window.format, "ihex")
+        self.window.vcc.setCurrentText("3.3")
+        self.assertTrue(self.window.choose_language("en"))
+        self.assertEqual(self.window.icsp.currentData(), "-i")
+        self.assertEqual(self.window.icsp.currentText(),
+                         mg.text_for("icsp.with_vcc", "en"))
+        self.assertEqual(self.window.format.currentData(), "ihex")
+        # A value the engine reported is a value, not a label: it is kept.
+        self.assertEqual(self.window.vcc.currentText(), "3.3")
+
+    def test_the_language_choice_reaches_the_next_window(self):
+        self.assertTrue(self.window.choose_language("en"))
+        other = self.make_window(self.binary)
+        self.assertEqual(mg.language(), "en")
+        self.assertEqual(other.read_button.text(),
+                         mg.text_for("action.read", "en"))
+        self.assertEqual(other.experimental_banner.text(),
+                         mg.text_for("banner.experimental", "en"))
+
+    def test_switching_language_keeps_the_answers_the_engine_gave(self):
+        # The header shows what the engine reported.  Retranslating must not
+        # turn an answer back into the waiting text it replaced.
+        self.window.apply_engine_info(
+            "minipro version 1.0.8 (build 7)\n"
+            "Git commit:\t0123456789abcdef0123456789abcdef0123456789\n")
+        self.window.apply_programmer("tl866a: TL866A is connected")
+        self.assertTrue(self.window.choose_language("en"))
+        self.assertIn("0123456789", self.window.engine_label.text())
+        self.assertEqual(self.window.programmer_label.text(), "tl866a")
+        self.window.apply_programmer("[No programmer found]")
+        self.assertTrue(self.window.choose_language("ro"))
+        self.assertEqual(self.window.programmer_label.text(),
+                         mg.text_for("header.no_programmer", "ro"))
+
+    def test_every_control_the_window_records_can_be_retitled(self):
+        # The window keeps a list of the controls whose words it owns.  Each
+        # entry must name a key the table can answer for and a kind the
+        # retranslation knows how to write, or switching language leaves that
+        # one control speaking the old language.
+        self.assertTrue(self.window._texts, "the window recorded no text at all")
+        for widget, kind, key in self.window._texts:
+            self.assertIn(key, mg.TEXTS,
+                          "%s was recorded with an unknown key" % key)
+            self.assertIsInstance(widget, QtWidgets.QWidget)
+            self.assertIn(kind, ("text", "title", "tip", "placeholder"))
+        for combo, items in self.window._combos:
+            for _value, label in items():
+                self.assertTrue(label.strip(),
+                                "one combo entry would show no text")
+
+    def test_the_view_menu_offers_each_language_once_and_marks_the_active(self):
+        actions = self.window.language_menu.actions()
+        # Each entry is written in the language it names, so an operator who
+        # cannot read the language the window is stuck in can still find their
+        # own by name.
+        self.assertEqual([name for _code, name in mg.LANGUAGE_CHOICES],
+                         [action.text() for action in actions])
+        self.assertEqual(len(actions), len(mg.LANGUAGE_CHOICES))
+        checked = [action for action in actions if action.isChecked()]
+        self.assertEqual(len(checked), 1, "the active language is not marked")
+        self.assertTrue(self.window.choose_language("en"))
+        checked = [action for action in self.window.language_menu.actions()
+                   if action.isChecked()]
+        self.assertEqual(len(checked), 1,
+                         "switching left more than one language marked")
+
+
+class TranslationTableChecks(unittest.TestCase):
+    """The keyed table itself: complete, two-sided, and free of diacritics."""
+
+    def body(self):
+        """Return the front-end source with the keyed table cut out of it."""
+        with open(GUI_PATH, encoding="utf-8") as handle:
+            source = handle.read()
+        start = source.index("TEXTS = {")
+        end = source.index("\n}\n", start)
+        return source[:start] + source[end:], source
+
+    def test_every_key_the_front_end_asks_for_is_in_the_table(self):
+        with open(GUI_PATH, encoding="utf-8") as handle:
+            source = handle.read()
+        # tr() is how a key is read, wherever it is read from: a builder that
+        # was handed a key the table never stored would have raised while the
+        # window was built, which every window check here already proves.
+        asked = set(re.findall(r'tr\("([a-z0-9_.]+)"\)', source))
+        self.assertEqual(sorted(asked - set(mg.TEXTS)), [],
+                         "keys asked for but never stored")
+
+    def test_every_row_carries_both_languages(self):
+        for key, row in mg.TEXTS.items():
+            self.assertEqual(len(row), 2, "%s does not name two languages" % key)
+            for half in row:
+                self.assertIsInstance(half, str, "%s holds a non-text" % key)
+                self.assertTrue(half.strip(), "%s holds an empty half" % key)
+
+    def test_the_romanian_half_never_relies_on_diacritics(self):
+        # A terminal or a font without them turns these letters into boxes,
+        # and the warning has to stay readable on the machine it warns.
+        letters = "ăâîșțĂÂÎȘȚ"
+        offenders = [key for key, row in mg.TEXTS.items()
+                     if any(letter in row[1] for letter in letters)]
+        self.assertEqual(offenders, [], "keys whose Romanian half has diacritics")
+        with open(GUI_PATH, encoding="utf-8") as handle:
+            self.assertNotRegex(handle.read(), "[%s]" % letters)
+
+    def test_no_row_of_the_table_is_left_unused(self):
+        # A key the front-end never asks for is a label that was dropped: the
+        # control it belonged to went away, or the call that showed it was
+        # rewritten and forgot to ask.  Either way the row hides that.
+        with open(GUI_PATH, encoding="utf-8") as handle:
+            source = handle.read()
+        start = source.index("TEXTS = {")
+        end = source.index("\n}\n", start)
+        table, body = source[start:end], source[:start] + source[end:]
+        keys = re.findall(r'^    "([a-z0-9_.]+)":', table, re.M)
+        self.assertTrue(keys, "the table holds no rows at all")
+        unused = [key for key in keys
+                  if not re.search(r'["(]%s[")]' % re.escape(key), body)]
+        self.assertEqual(unused, [], "rows the front-end never asks for")
+
+    def test_no_control_is_left_with_a_hard_coded_label(self):
+        # Every label the window shows comes from the table, so a call that
+        # hands a literal string to a text setter is a label that will never
+        # switch language.
+        body, _source = self.body()
+        offenders = re.findall(r'(?:setText|setTitle|setWindowTitle|setToolTip'
+                               r'|setPlaceholderText)\("([^"]+)"', body)
+        self.assertEqual(offenders, [], "labels set outside the table")
+
+
 def main():
     """Run every sealed check, and the engine checks only when they are asked for."""
     suite = unittest.TestSuite()
@@ -1679,7 +1884,8 @@ def main():
                   "StubbornCloseChecks", "ParsingChecks",
                   "ChannelDecodingChecks", "EngineLookupChecks",
                   "MissingEngineChecks", "DatabaseHomeChecks",
-                  "ProcessIsolationChecks", "EngineDatabaseChecks"):
+                  "ProcessIsolationChecks", "EngineDatabaseChecks",
+                  "LanguageChecks", "TranslationTableChecks"):
         suite.addTests(unittest.defaultTestLoader.loadTestsFromName(
             name, sys.modules[__name__]))
     result = unittest.TextTestRunner(verbosity=2).run(suite)

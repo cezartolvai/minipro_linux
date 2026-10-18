@@ -304,6 +304,24 @@ python3 gui/minipro_gui.py --binary ../build/minipro
 The chip databases are taken from the directory named by `MINIPRO_HOME`, or
 from the directory the engine was found in.
 
+### The language of the front-end
+
+The front-end speaks English and Romana, and opens in whichever language it
+chose last.  The choice is made from the `View` menu (`Vedere`, under
+`Limba`, in the Romanian window) and is remembered between runs, so a window
+stuck in a language the operator cannot read is escapable: each entry in the
+language menu is written in the language it names.
+
+The Romanian text is written without diacritics on purpose.  A terminal or a
+font that cannot draw them turns those letters into boxes, and the warning the
+front-end carries has to stay readable on the machine it warns.
+
+The window also keeps a permanent banner above its controls saying that it is
+experimental.  A modal warning at startup is dismissed and gone, so it teaches
+nothing about the operation the operator is about to run; the banner stays
+readable while a write or an erase is in progress, which is the one moment it
+matters.
+
 ### Installing PyQt5
 
 The front-end needs Python 3 and PyQt5.
