@@ -139,6 +139,25 @@ library: $(VERSION_STRINGS) $(COMMON_OBJECTS)
 gui-test:
 	@python3 gui/tests/minipro_regression.py
 
+# A seatbelt, not a fence: this only stops a mistyped `git push upstream` in
+# this one checkout.  A fresh clone carries the real push URL, so the policy
+# lives in the README and not here.  Both targets are idempotent.
+guard-upstream:
+	@if git remote get-url upstream >/dev/null 2>&1; then \
+		git config remote.upstream.pushurl DISABLED-do-not-push-to-upstream; \
+		echo "upstream cannot be pushed to from this checkout."; \
+	else \
+		echo "No remote named upstream in this checkout: nothing to guard."; \
+	fi
+
+unguard-upstream:
+	@if git config --get remote.upstream.pushurl >/dev/null 2>&1; then \
+		git config --unset remote.upstream.pushurl; \
+		echo "upstream push URL is back to its fetch URL."; \
+	else \
+		echo "upstream was not guarded in this checkout."; \
+	fi
+
 clean:
 	rm -f $(OBJECTS) $(PROGS)
 	rm -f $(STATIC_LIB)
@@ -217,4 +236,4 @@ else
 endif
 
 
-.PHONY: all dist distclean clean install install-algorithm test version-info gui-test
+.PHONY: all dist distclean clean install install-algorithm test version-info gui-test guard-upstream unguard-upstream

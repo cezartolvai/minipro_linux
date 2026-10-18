@@ -34,8 +34,16 @@ and a CI job that runs it headlessly on every push.
 
 Everything here stays under the GNU General Public License version 3 or later,
 which is the license upstream uses.  See `LICENSE` for the license text and
-`debian/copyright` for the file-by-file notice.  Upstream remains the place to
-take engine bugs and engine patches to.
+`debian/copyright` for the file-by-file notice.
+
+One sentence decides where any change goes.  Engine work - the engine, its
+chip databases, its documentation, its packaging - goes upstream, where it
+always did.  The front-end in `gui/` stays on this fork until it has been
+exercised on real hardware, programmer by programmer and chip by chip, as
+`gui/HARDWARE-CHECKS.md` records: the headless suite proves the promises the
+window makes to itself, not what a programmer and a chip do back, so that
+sheet and not the suite is the gate.  Nothing from `gui/` is offered to
+upstream before every row of that sheet is filled in.
 
 The remotes are named for that relationship: `origin` is this fork and
 `upstream` is the GitLab project.  To bring the fork up to date with engine
@@ -48,12 +56,30 @@ make gui-test
 git push origin master
 ```
 
-Work lands on this fork and stays there.  Nothing from `gui/` is offered to the
-upstream project until the front-end has been exercised on real hardware,
-programmer by programmer and chip by chip: the headless suite proves the
-promises the window makes to itself, not what a programmer and a chip do back.
-Engine bugs and engine patches still belong upstream, where they always did -
-what waits for the hardware checks is the front-end.
+The `upstream` remote is deliberately unpushable on the machine this fork is
+worked on: its push URL names something that is not a repository, so a
+mistyped `git push upstream` stops before it reaches GitLab.
+
+```nohighlight
+$ git push upstream master
+fatal: 'DISABLED-do-not-push-to-upstream' does not appear to be a git repository
+fatal: Could not read from remote repository.
+
+Please make sure you have the correct access rights
+and the repository exists.
+```
+
+That failure is what the setting is for, not a broken remote: fetching still
+works, because only the push URL is disabled.  Do not repair it by putting the
+GitLab URL back.  `make guard-upstream` sets the guard on a fresh clone, and
+`make unguard-upstream` takes it off for the rare case where a push upstream is
+genuinely meant.
+
+It is a seatbelt and not a fence.  The setting lives in this checkout's
+`.git/config`, so it travels nowhere: a fresh clone carries the real push URL,
+and nothing here stops anyone else from pushing anywhere.  The paragraph above
+is the policy; the guard only stops a hand that reaches for the wrong remote on
+this one machine.
 
 
 ## Features

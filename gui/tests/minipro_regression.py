@@ -39,6 +39,8 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(os.path.dirname(HERE))
 GUI_PATH = os.path.join(ROOT, "gui", "minipro_gui.py")
+SHEET_PATH = os.path.join(ROOT, "gui", "HARDWARE-CHECKS.md")
+README_PATH = os.path.join(ROOT, "README.md")
 STUB = os.path.join(HERE, "fakeminipro.sh")
 SLOW_STUB = os.path.join(HERE, "fakeminipro_slow.sh")
 STUBBORN_STUB = os.path.join(HERE, "fakeminipro_stubborn.sh")
@@ -1875,6 +1877,67 @@ class TranslationTableChecks(unittest.TestCase):
         self.assertEqual(offenders, [], "labels set outside the table")
 
 
+class HardwareSheetChecks(unittest.TestCase):
+    """The hardware gate: the sheet has to keep up with the front-end.
+
+    The README holds any upstream offer of gui/ back until gui/HARDWARE-CHECKS.md
+    has been filled in on real hardware.  A sheet that fell behind the front-end
+    would let a new control reach a chip without that chip ever having been
+    checked with it, so the sheet is compared with the front-end here, where no
+    hardware is involved.
+    """
+
+    def builders(self):
+        """Return the source of the argument builders, and of the whole window.
+
+        The front-end is loaded from its file rather than imported, so its
+        methods cannot be read with inspect; the text is cut out here instead,
+        the same way the translation-table checks cut the keyed table out.
+        """
+        with open(GUI_PATH, encoding="utf-8") as handle:
+            source = handle.read()
+        builders = ""
+        for name in ("_op_args", "_add_overrides", "_db_args"):
+            start = source.index("def %s(" % name)
+            end = source.index("\n    def ", start + 1)
+            builders += source[start:end]
+        return builders, source
+
+    def window_options(self):
+        """Return every engine option the front-end is able to put on a line."""
+        builders, source = self.builders()
+        options = set(mg.ACTION_FLAGS.values())
+        options.update(re.findall(r'"(-{1,2}[A-Za-z_]+)"', builders))
+        # The actions that carry no chip: their option is the first literal of
+        # the call that starts them.
+        options.update(re.findall(r'_start\(\["(-[A-Za-z]+)"', source))
+        # The database queries wrap their option in the database selector.
+        options.update(re.findall(r'_db_args\(\["(-[A-Za-z]+)"', source))
+        # The options that arrive as the data of a combo rather than as a
+        # literal in the builder.
+        for table in (mg.ICSP_VALUES, mg.CONFIG_SECTIONS, mg.SIZE_MODES):
+            options.update(value for value, _key in table
+                           if value and value.startswith("-"))
+        self.assertTrue(options, "the front-end can send no options at all")
+        return options
+
+    def test_the_sheet_names_every_option_the_window_can_send(self):
+        with open(SHEET_PATH, encoding="utf-8") as handle:
+            sheet = handle.read()
+        missing = sorted(option for option in self.window_options()
+                         if "`%s`" % option not in sheet)
+        self.assertEqual(missing, [],
+                         "options no row of the hardware sheet covers")
+
+    def test_the_readme_points_at_the_sheet(self):
+        # The gate is one sentence in one place.  A reader who cannot find the
+        # sheet cannot tell what "exercised on real hardware" is supposed to
+        # mean, and a sheet nobody points at is a sheet nobody fills in.
+        with open(README_PATH, encoding="utf-8") as handle:
+            readme = handle.read()
+        self.assertIn("gui/HARDWARE-CHECKS.md", readme)
+
+
 def main():
     """Run every sealed check, and the engine checks only when they are asked for."""
     suite = unittest.TestSuite()
@@ -1885,7 +1948,8 @@ def main():
                   "ChannelDecodingChecks", "EngineLookupChecks",
                   "MissingEngineChecks", "DatabaseHomeChecks",
                   "ProcessIsolationChecks", "EngineDatabaseChecks",
-                  "LanguageChecks", "TranslationTableChecks"):
+                  "LanguageChecks", "TranslationTableChecks",
+                  "HardwareSheetChecks"):
         suite.addTests(unittest.defaultTestLoader.loadTestsFromName(
             name, sys.modules[__name__]))
     result = unittest.TextTestRunner(verbosity=2).run(suite)
