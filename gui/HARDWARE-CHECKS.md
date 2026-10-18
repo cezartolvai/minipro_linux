@@ -322,10 +322,12 @@ Record: the name returned, and the part that was really in the socket.
 
 ### C.13 Overrides reach the command line
 
-Do: with the record from C.6 loaded, choose a `--vcc` and a `--spi_clock` that
-are not the defaults, type a `--pulse` and an `--address`, and set the
-overcurrent combo away from the firmware default.  Then run a non-destructive
-action, a read will do.
+Do: open the Advanced group first.  It starts closed, its controls are
+disabled until it is open, and while it is closed the window sends none of
+these options, whatever the combos show.  With the record from C.6 loaded,
+choose a `--vcc` and a `--spi_clock` that are not the defaults, type a
+`--pulse` and an `--address`, and set the overcurrent combo away from the
+firmware default.  Then run a non-destructive action, a read will do.
 
 Journal first line: the same command as C.7 plus `--vcc <value>`,
 `--spi_clock <value>`, `--pulse <value>`, `--address <value>` and
@@ -335,7 +337,10 @@ this line was never sent: the control moved, the engine never heard about it.
 Compare: the same command typed by hand with the same options.
 
 Expect: the action still ends with its own verdict.  The options changed the
-run; they did not break how the command is read.
+run; they did not break how the command is read.  Then close the box and run
+the same action again: `--vcc`, `--spi_clock`, `--pulse`, `--address` and `-o`
+must all be absent from that line.  A closed box is the window saying it is
+not applying them.
 
 Then change the chip name, or the database combo.  The journal must write `The
 chip overrides were reset: the selected chip changed.` or `The chip overrides
@@ -375,9 +380,11 @@ file looked like in the chosen format.
 
 ### C.15 The advanced options, one at a time
 
-Do: with a non-destructive action queued, set one advanced control at a time
-and run it.  The check boxes are `-x`, `-e`, `-v`, `-u`, `-P`, `-B`, `-y`; the
-ICSP combo sends `-i` or `-I`; the file size combo sends `-s` or `-S`.
+Do: with the Advanced group open and a non-destructive action queued, set one
+advanced control at a time and run it, leaving every other advanced control at
+rest and the overrides from C.13 reset.  The check boxes are `-x`, `-e`,
+`-v`, `-u`, `-P`, `-B`, `-y`; the ICSP combo sends `-i` or `-I`; the file size
+combo sends `-s` or `-S`.
 
 Expect: the journal command line carries exactly the option belonging to the
 control that was moved, and nothing else.  `-x` is refused for a read, a
