@@ -48,6 +48,13 @@ make gui-test
 git push origin master
 ```
 
+Work lands on this fork and stays there.  Nothing from `gui/` is offered to the
+upstream project until the front-end has been exercised on real hardware,
+programmer by programmer and chip by chip: the headless suite proves the
+promises the window makes to itself, not what a programmer and a chip do back.
+Engine bugs and engine patches still belong upstream, where they always did -
+what waits for the hardware checks is the front-end.
+
 
 ## Features
 * Native support for Linux, BSD, macOS, and other flavors of Unix.
